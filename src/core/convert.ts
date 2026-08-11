@@ -1,5 +1,54 @@
-import axios from "axios";
 import YAML from "yaml";
+
+export type SubscriptionTarget = "clash" | "surge";
+
+export type SubscriptionFetchPolicy = Readonly<{
+  timeoutMs: number;
+  maxResponseBytes: number;
+  maxRedirects: number;
+  userAgent: string;
+}>;
+
+export type SubscriptionFetchErrorCode =
+  | "invalid_url"
+  | "network"
+  | "timeout"
+  | "too_large"
+  | "http_status"
+  | "redirect"
+  | "empty_response";
+
+export type SubscriptionConfigErrorCode =
+  | "invalid_config"
+  | "no_proxies"
+  | "unsupported_proxies";
+
+export const MAX_SUBSCRIPTION_URL_LENGTH = 4096;
+
+export const SUBSCRIPTION_FETCH_POLICY: SubscriptionFetchPolicy = Object.freeze({
+  timeoutMs: 15_000,
+  maxResponseBytes: 4 * 1024 * 1024,
+  maxRedirects: 5,
+  userAgent:
+    "ClashX Pro/1.72.0.4 (com.west2online.ClashXPro; build:1.72.0.4; macOS 12.0.1) Alamofire/5.4.4",
+});
+
+export class SubscriptionFetchError extends Error {
+  constructor(
+    public readonly code: SubscriptionFetchErrorCode,
+    public readonly upstreamStatus: number | undefined
+  ) {
+    super(getSubscriptionFetchErrorMessage(code));
+    this.name = "SubscriptionFetchError";
+  }
+}
+
+export class SubscriptionConfigError extends Error {
+  constructor(public readonly code: SubscriptionConfigErrorCode) {
+    super(getSubscriptionConfigErrorMessage(code));
+    this.name = "SubscriptionConfigError";
+  }
+}
 
 // 统一的中间格式，便于实现 Clash <-> Surge 双向转换
 type ProxyCommon = {
@@ -41,22 +90,21 @@ type Proxy =
 
 export async function convertFromSubscription(
   url: string,
-  target: "clash" | "surge"
+  target: SubscriptionTarget,
+  fetcher: typeof fetch,
+  fetchPolicy: SubscriptionFetchPolicy
 ): Promise<string> {
-  let configFile = await fetchConfig(url);
-  if (configFile === null) {
-    throw new Error("Unable to get config");
-  }
-  let source = getConfigType(configFile);
+  const configFile = await fetchConfig(url, fetcher, fetchPolicy);
+  const source = getConfigType(configFile);
 
   // Clash to Clash
   if (source === "clash" && target === "clash") {
     let config = parseClashConfig(configFile);
     if (config === null) {
-      throw new Error("Unable to parse config");
+      throw new SubscriptionConfigError("invalid_config");
     }
-    if (config.proxies === undefined) {
-      throw new Error("No proxies in this config");
+    if (config.proxies === undefined || config.proxies.length === 0) {
+      throw new SubscriptionConfigError("no_proxies");
     }
     return YAML.stringify({ proxies: config.proxies });
   }
@@ -70,7 +118,7 @@ export async function convertFromSubscription(
 
     lines.forEach((rawLine) => {
       const line = rawLine.trim();
-      if (line.startsWith("[")) {
+      if (isSurgeSectionHeader(line)) {
         inProxySection = line === "[Proxy]";
         return;
       }
@@ -86,7 +134,7 @@ export async function convertFromSubscription(
     });
 
     if (proxies.length === 0) {
-      throw new Error("No proxies in this config");
+      throw new SubscriptionConfigError("no_proxies");
     }
     return proxies.join("\n");
   }
@@ -95,10 +143,10 @@ export async function convertFromSubscription(
   if (source === "clash" && target === "surge") {
     let config = parseClashConfig(configFile);
     if (config === null) {
-      throw new Error("Unable to parse config");
+      throw new SubscriptionConfigError("invalid_config");
     }
-    if (config.proxies === undefined) {
-      throw new Error("No proxies in this config");
+    if (config.proxies === undefined || config.proxies.length === 0) {
+      throw new SubscriptionConfigError("no_proxies");
     }
     const intermediates: Proxy[] = config.proxies
       .map((p: any) => clashProxyToIntermediate(p))
@@ -108,7 +156,7 @@ export async function convertFromSubscription(
       .map((obj) => intermediateToSurgeLine(obj))
       .filter((s: string | undefined) => s !== undefined) as string[];
     if (surgeLines.length === 0) {
-      throw new Error("No supported proxies after conversion");
+      throw new SubscriptionConfigError("unsupported_proxies");
     }
     return surgeLines.join("\n");
   }
@@ -121,7 +169,7 @@ export async function convertFromSubscription(
 
     lines.forEach((rawLine) => {
       const line = rawLine.trim();
-      if (line.startsWith("[")) {
+      if (isSurgeSectionHeader(line)) {
         inProxySection = line === "[Proxy]";
         return;
       }
@@ -132,7 +180,7 @@ export async function convertFromSubscription(
     });
 
     if (proxyLines.length === 0) {
-      throw new Error("No proxies in this config");
+      throw new SubscriptionConfigError("no_proxies");
     }
 
     const intermediates: Proxy[] = proxyLines
@@ -140,7 +188,7 @@ export async function convertFromSubscription(
       .filter((p: Proxy | undefined) => p !== undefined) as Proxy[];
 
     if (intermediates.length === 0) {
-      throw new Error("No supported proxies after conversion");
+      throw new SubscriptionConfigError("unsupported_proxies");
     }
 
     const clashProxies = intermediates
@@ -153,31 +201,332 @@ export async function convertFromSubscription(
   throw new Error("Unsupported conversion combination");
 }
 
-async function fetchConfig(url: string): Promise<string | null> {
-  const result = await axios({
-    url,
-    headers: {
-      "User-Agent":
-        "ClashX Pro/1.72.0.4 (com.west2online.ClashXPro; build:1.72.0.4; macOS 12.0.1) Alamofire/5.4.4",
-    },
-  });
+async function fetchConfig(
+  url: string,
+  fetcher: typeof fetch,
+  fetchPolicy: SubscriptionFetchPolicy
+): Promise<string> {
+  const abortController = new AbortController();
+  const timeoutId = setTimeout(
+    () => abortController.abort(),
+    fetchPolicy.timeoutMs
+  );
 
-  return (result.data || null) as string | null;
+  try {
+    let currentUrl = validateSubscriptionUrl(url);
+    let redirectCount = 0;
+
+    while (true) {
+      let upstreamResponse: Response;
+      try {
+        upstreamResponse = await fetcher(currentUrl.toString(), {
+          method: "GET",
+          headers: {
+            Accept: "text/plain, application/yaml, application/x-yaml, */*",
+            "User-Agent": fetchPolicy.userAgent,
+          },
+          cache: "no-store",
+          redirect: "manual",
+          signal: abortController.signal,
+        });
+      } catch (error) {
+        if (abortController.signal.aborted || isAbortError(error)) {
+          throw new SubscriptionFetchError("timeout", undefined);
+        }
+        throw new SubscriptionFetchError("network", undefined);
+      }
+
+      if (isRedirectStatus(upstreamResponse.status)) {
+        const redirectLocation = upstreamResponse.headers.get("Location");
+        await cancelResponseBody(upstreamResponse);
+
+        if (
+          redirectLocation === null ||
+          redirectCount >= fetchPolicy.maxRedirects
+        ) {
+          throw new SubscriptionFetchError(
+            "redirect",
+            upstreamResponse.status
+          );
+        }
+
+        let redirectedUrl: URL;
+        try {
+          redirectedUrl = new URL(redirectLocation, currentUrl);
+        } catch {
+          throw new SubscriptionFetchError(
+            "redirect",
+            upstreamResponse.status
+          );
+        }
+
+        currentUrl = validateSubscriptionUrl(redirectedUrl.toString());
+        redirectCount += 1;
+        continue;
+      }
+
+      if (!upstreamResponse.ok) {
+        await cancelResponseBody(upstreamResponse);
+        throw new SubscriptionFetchError(
+          "http_status",
+          upstreamResponse.status
+        );
+      }
+
+      try {
+        const config = await readBoundedText(
+          upstreamResponse,
+          fetchPolicy.maxResponseBytes,
+          abortController.signal
+        );
+        if (config.trim().length === 0) {
+          throw new SubscriptionFetchError("empty_response", undefined);
+        }
+        return config;
+      } catch (error) {
+        if (error instanceof SubscriptionFetchError) {
+          throw error;
+        }
+        if (abortController.signal.aborted || isAbortError(error)) {
+          throw new SubscriptionFetchError("timeout", undefined);
+        }
+        throw new SubscriptionFetchError("network", undefined);
+      }
+    }
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+export function validateSubscriptionUrl(value: string): URL {
+  if (value.length === 0 || value.length > MAX_SUBSCRIPTION_URL_LENGTH) {
+    throw new SubscriptionFetchError("invalid_url", undefined);
+  }
+
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new SubscriptionFetchError("invalid_url", undefined);
+  }
+
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new SubscriptionFetchError("invalid_url", undefined);
+  }
+  if (url.username.length > 0 || url.password.length > 0 || url.hash.length > 0) {
+    throw new SubscriptionFetchError("invalid_url", undefined);
+  }
+  if (isBlockedHostname(url.hostname)) {
+    throw new SubscriptionFetchError("invalid_url", undefined);
+  }
+
+  return url;
+}
+
+async function readBoundedText(
+  response: Response,
+  maxResponseBytes: number,
+  abortSignal: AbortSignal
+): Promise<string> {
+  const contentLength = response.headers.get("Content-Length");
+  if (contentLength !== null) {
+    const declaredBytes = Number(contentLength);
+    if (
+      Number.isSafeInteger(declaredBytes) &&
+      declaredBytes >= 0 &&
+      declaredBytes > maxResponseBytes
+    ) {
+      await cancelResponseBody(response);
+      throw new SubscriptionFetchError("too_large", undefined);
+    }
+  }
+
+  if (response.body === null) {
+    return "";
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let receivedBytes = 0;
+  let text = "";
+
+  while (true) {
+    if (abortSignal.aborted) {
+      await reader.cancel();
+      throw new SubscriptionFetchError("timeout", undefined);
+    }
+
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    receivedBytes += value.byteLength;
+    if (receivedBytes > maxResponseBytes) {
+      await reader.cancel();
+      throw new SubscriptionFetchError("too_large", undefined);
+    }
+
+    text += decoder.decode(value, { stream: true });
+  }
+
+  return text + decoder.decode();
+}
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // The original, sanitized fetch error is more useful than a cancel error.
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function isRedirectStatus(status: number): boolean {
+  return (
+    status === 301 ||
+    status === 302 ||
+    status === 303 ||
+    status === 307 ||
+    status === 308
+  );
+}
+
+function isBlockedHostname(hostname: string): boolean {
+  const normalizedHostname = hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "")
+    .replace(/\.$/, "");
+
+  if (
+    normalizedHostname === "localhost" ||
+    normalizedHostname.endsWith(".localhost")
+  ) {
+    return true;
+  }
+
+  const ipv4Parts = normalizedHostname.split(".");
+  if (
+    ipv4Parts.length === 4 &&
+    ipv4Parts.every((part) => /^\d{1,3}$/.test(part))
+  ) {
+    const octets = ipv4Parts.map(Number);
+    if (octets.every((octet) => octet >= 0 && octet <= 255)) {
+      return isBlockedIpv4(octets);
+    }
+  }
+
+  if (normalizedHostname.includes(":")) {
+    return isBlockedIpv6(normalizedHostname);
+  }
+
+  return false;
+}
+
+function isBlockedIpv4(octets: number[]): boolean {
+  const [first, second] = octets;
+  return (
+    first === 0 ||
+    first === 10 ||
+    first === 127 ||
+    (first === 100 && second >= 64 && second <= 127) ||
+    (first === 169 && second === 254) ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 0) ||
+    (first === 192 && second === 168) ||
+    (first === 198 && (second === 18 || second === 19)) ||
+    first >= 224
+  );
+}
+
+function isBlockedIpv6(hostname: string): boolean {
+  if (
+    hostname === "::" ||
+    hostname === "::1" ||
+    hostname.startsWith("::ffff:") ||
+    hostname.startsWith("2001:db8:")
+  ) {
+    return true;
+  }
+
+  const firstSegment = Number.parseInt(hostname.split(":")[0], 16);
+  return (
+    (firstSegment & 0xfe00) === 0xfc00 ||
+    (firstSegment & 0xffc0) === 0xfe80 ||
+    (firstSegment & 0xff00) === 0xff00
+  );
+}
+
+function getSubscriptionFetchErrorMessage(
+  code: SubscriptionFetchErrorCode
+): string {
+  switch (code) {
+    case "invalid_url":
+      return "Subscription URL is not allowed";
+    case "network":
+      return "Unable to fetch subscription";
+    case "timeout":
+      return "Subscription request timed out";
+    case "too_large":
+      return "Subscription response is too large";
+    case "http_status":
+      return "Subscription server returned an error";
+    case "redirect":
+      return "Subscription redirect is not allowed";
+    case "empty_response":
+      return "Subscription response is empty";
+  }
+}
+
+function getSubscriptionConfigErrorMessage(
+  code: SubscriptionConfigErrorCode
+): string {
+  switch (code) {
+    case "invalid_config":
+      return "Subscription config is invalid";
+    case "no_proxies":
+      return "Subscription config contains no proxies";
+    case "unsupported_proxies":
+      return "Subscription config contains no supported proxies";
+  }
 }
 
 function getConfigType(config: string): "clash" | "surge" {
-  if (config.includes("[Proxy Group]")) {
+  if (
+    config
+      .split(/\r?\n/)
+      .some((line) => line.trim() === "[Proxy]")
+  ) {
     return "surge";
   }
   return "clash";
 }
 
-function parseClashConfig(config: string): { proxies: any[] } | null {
-  return YAML.parse(config);
+function isSurgeSectionHeader(line: string): boolean {
+  return /^\[[^\]]+\]$/.test(line);
 }
 
-function parseSurgeConfig(config: string): { proxies: any[] } | null {
-  return YAML.parse(config);
+function parseClashConfig(config: string): { proxies?: any[] } | null {
+  try {
+    const parsed: unknown = YAML.parse(config);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return null;
+    }
+
+    const proxies = (parsed as { proxies?: unknown }).proxies;
+    if (proxies === undefined) {
+      return {};
+    }
+    if (!Array.isArray(proxies)) {
+      return null;
+    }
+    return { proxies };
+  } catch {
+    return null;
+  }
 }
 
 // 将 Clash 的 proxy 对象转换为中间格式

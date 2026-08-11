@@ -1,20 +1,39 @@
-import { z } from "zod";
-import { convertFromSubscription } from "../src/core/convert.js";
+import type { VercelRequest, VercelResponse } from "@vercel/node";
 
-export default async function handler(request: any, response: any) {
+import { convertQuerySchema } from "../src/api/convert-query.js";
+import {
+  convertFromSubscription,
+  SUBSCRIPTION_FETCH_POLICY,
+  SubscriptionConfigError,
+  SubscriptionFetchError,
+} from "../src/core/convert.js";
+
+export default async function handler(
+  request: VercelRequest,
+  response: VercelResponse
+) {
   const toString = (value: unknown): string | undefined => {
-    if (Array.isArray(value)) return value[0] as string | undefined;
-    return value as string | undefined;
+    if (Array.isArray(value)) {
+      return typeof value[0] === "string" ? value[0] : undefined;
+    }
+    return typeof value === "string" ? value : undefined;
   };
 
-  const querySchema = z.object({
-    url: z.string().url(),
-    target: z.enum(["clash", "surge"]).default("clash"),
-  });
+  response.setHeader("Cache-Control", "no-store");
+  response.setHeader("X-Content-Type-Options", "nosniff");
 
-  const parsed = querySchema.safeParse({
-    url: toString(request.query?.url),
-    target: toString(request.query?.target),
+  if (request.method !== "GET") {
+    response.setHeader("Allow", "GET");
+    response.status(405).json({
+      error: "Method not allowed",
+      code: "METHOD_NOT_ALLOWED",
+    });
+    return;
+  }
+
+  const parsed = convertQuerySchema.safeParse({
+    url: toString(request.query.url),
+    target: toString(request.query.target),
   });
 
   if (!parsed.success) {
@@ -27,10 +46,26 @@ export default async function handler(request: any, response: any) {
 
   const { url, target } = parsed.data;
   try {
-    const result = await convertFromSubscription(url, target);
+    const result = await convertFromSubscription(
+      url,
+      target,
+      fetch,
+      SUBSCRIPTION_FETCH_POLICY
+    );
     response.setHeader("Content-Type", "text/plain; charset=utf-8");
     response.status(200).send(result);
   } catch (error) {
-    response.status(500).send(`${error}`);
+    const status =
+      error instanceof SubscriptionFetchError
+        ? error.code === "timeout"
+          ? 504
+          : 502
+        : error instanceof SubscriptionConfigError
+          ? 502
+        : 500;
+    response.status(status).json({
+      error: "Unable to convert subscription",
+      code: "CONVERSION_FAILED",
+    });
   }
 }

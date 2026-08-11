@@ -1,0 +1,19 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "proxy-provider-converter",
+  "account_id": "8c60d37ea6d3a0cbd7aaa0bf6076bda2",
+  "main": "./worker/index.ts",
+  "tsconfig": "./tsconfig.worker.json",
+  "compatibility_date": "2026-08-08",
+  "workers_dev": true,
+  "preview_urls": false,
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api", "/api/*"]
+  },
+  "observability": {
+    "enabled": false
+  }
+}

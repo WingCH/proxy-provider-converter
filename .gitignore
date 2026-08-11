@@ -7,6 +7,13 @@
 
 # testing
 /coverage
+/worker-configuration.d.ts
+/.wrangler
+
+# local agent planning
+/task_plan.md
+/findings.md
+/progress.md
 
 # next.js
 /.next/

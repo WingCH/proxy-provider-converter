@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { CopyToClipboard } from "react-copy-to-clipboard";
 import toast, { Toaster } from "react-hot-toast";
 
-import { ChevronUpDownIcon, ClipboardDocumentIcon } from '@heroicons/react/24/outline'
-
+import {
+  ChevronUpDownIcon,
+  ClipboardDocumentIcon,
+} from "@heroicons/react/24/outline";
 
 export default function App() {
   const [url, setUrl] = useState("");
@@ -20,10 +21,14 @@ export default function App() {
     // ignore
   }
 
-  const copiedToast = () =>
-    toast("已复制", {
-      position: "bottom-center",
-    });
+  const copyText = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("已複製", { position: "bottom-center" });
+    } catch {
+      toast.error("複製失敗，請手動複製", { position: "bottom-center" });
+    }
+  };
 
   const clashConfig = `# Clash 配置格式
 
@@ -65,25 +70,25 @@ ${hostname || "External Group"} = select, policy-path=${convertedUrl}
               Proxy Provider Converter
             </h1>
             <p className="mt-2 md:text-lg text-gray-600">
-              一个可以将Clash/Surge订阅转换成Proxy Provider和External
-              Group(Surge)的工具
+              一個把 Clash／Surge 訂閱轉換成 Proxy Provider 與 External
+              Group（Surge）的工具
             </p>
           </div>
         </div>
         <div className="mt-12 text-gray-900">
           <h3 className="text-lg md:text-xl font-bold">
-            介绍
+            介紹
           </h3>
           <p className="mt-2">
-            本工具可以从其他订阅自动获取和更新代理节点，支持将整个订阅拆分成可复用的节点清单、把多个订阅合并到一起统一管理，并让节点来源与规则设置分离——你可以使用他人分享的订阅节点，同时保持自己的规则策略不变。
+            本工具可以從其他訂閱自動取得及更新代理節點，支援把完整訂閱拆成可重用的節點清單、合併多個訂閱並統一管理，同時讓節點來源與規則設定分離。你可以使用他人分享的訂閱節點，並保留自己的規則策略。
           </p>
         </div>
         <div className="w-full text-gray-900 mt-14">
-          <h3 className="text-lg md:text-xl font-bold">开始使用</h3>
+          <h3 className="text-lg md:text-xl font-bold">開始使用</h3>
           <div className="flex w-full gap-4 mt-4 flex-col md:flex-row">
             <input
               className="w-full h-full p-4 text-lg bg-white rounded-xl focus:outline-2 focus:outline-offset-2 focus:outline-yellow-500"
-              placeholder="粘贴Clash或Surge订阅链接到这里"
+              placeholder="貼上 Clash 或 Surge 訂閱連結"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
             />
@@ -93,8 +98,8 @@ ${hostname || "External Group"} = select, policy-path=${convertedUrl}
                 value={target}
                 onChange={(e) => setTarget(e.target.value)}
               >
-                <option value="clash">转换到 Clash</option>
-                <option value="surge">转换到 Surge</option>
+                <option value="clash">轉換為 Clash</option>
+                <option value="surge">轉換為 Surge</option>
               </select>
               <ChevronUpDownIcon className="absolute h-6 top-3.5 right-3 text-gray-300" />
             </div>
@@ -103,12 +108,14 @@ ${hostname || "External Group"} = select, policy-path=${convertedUrl}
         {url && (
           <div className="break-all p-3 mt-4 rounded-lg text-gray-100 bg-gray-900 shadow-sm w-full">
             {convertedUrl}
-            <CopyToClipboard text={convertedUrl} onCopy={() => copiedToast()}>
-              <div className="flex items-center text-sm mt-4 text-gray-400  cursor-pointer  hover:text-gray-300 transition duration-200 select-none">
-                <ClipboardDocumentIcon className="h-5 w-5 mr-1 inline-block" />
-                点击复制
-              </div>
-            </CopyToClipboard>
+            <button
+              type="button"
+              onClick={() => void copyText(convertedUrl)}
+              className="flex items-center text-sm mt-4 text-gray-400 cursor-pointer hover:text-gray-300 transition duration-200 select-none"
+            >
+              <ClipboardDocumentIcon className="h-5 w-5 mr-1 inline-block" />
+              點擊複製
+            </button>
           </div>
         )}
         {url && (
@@ -117,27 +124,28 @@ ${hostname || "External Group"} = select, policy-path=${convertedUrl}
               <pre className="whitespace-pre-wrap">{clashConfig}</pre>
             )}
             {target === "surge" && <pre>{surgeConfig}</pre>}
-            <CopyToClipboard
-              text={target === "surge" ? surgeConfig : clashConfig}
-              onCopy={() => copiedToast()}
+            <button
+              type="button"
+              onClick={() =>
+                void copyText(target === "surge" ? surgeConfig : clashConfig)
+              }
+              className="flex items-center text-sm mt-4 text-gray-400 cursor-pointer hover:text-gray-300 transition duration-200 select-none"
             >
-              <div className="flex items-center text-sm mt-4 text-gray-400 cursor-pointer hover:text-gray-300 transition duration-200 select-none">
-                <ClipboardDocumentIcon className="h-5 w-5 mr-1 inline-block" />
-                点击复制
-              </div>
-            </CopyToClipboard>
+              <ClipboardDocumentIcon className="h-5 w-5 mr-1 inline-block" />
+              點擊複製
+            </button>
           </div>
         )}
         <div className="w-full text-gray-900 mt-14">
           <h3 className="text-lg md:text-xl font-bold">
-            自己部署转换工具
+            自行部署轉換工具
           </h3>
           <p className="mt-2">
-            使用工具时，{window.location.origin}
-            的拥有者将会有权限查看到你的订阅链接，如果你不想让给他人这种权限，你可以根据下面步骤你可以零成本部署一个属于你的转换工具。
+            使用工具時，{window.location.origin}
+            的擁有者可以讀取你的訂閱連結。如果不希望交由第三方處理，可依照以下步驟部署自己的 Cloudflare Worker。
           </p>
           <p className="mt-2">
-            前期准备：你需要一个
+            準備事項：你需要
             <a
               href="https://github.com"
               target="_blank"
@@ -145,37 +153,32 @@ ${hostname || "External Group"} = select, policy-path=${convertedUrl}
             >
               GitHub
             </a>
-            账号
+            {" "}帳戶與{" "}
+            <a
+              href="https://dash.cloudflare.com"
+              target="_blank"
+              rel="noreferrer"
+              className="text-yellow-600 transition hover:text-yellow-500"
+            >
+              Cloudflare
+            </a>
+            {" "}帳戶。
           </p>
           <ul className="mt-1">
             <li>
-              1. 打开
+              1. 開啟
               <a
                 href="https://github.com/qier222/proxy-provider-converter"
                 target="_blank"
                 className="text-yellow-600 transition hover:text-yellow-500"
               >
-                https://github.com/qier222/proxy-provider-converter
+                GitHub repository
               </a>
             </li>
-            <li>2. 点右上角 Fork，把项目复制到你的 GitHub</li>
-            <li>
-              3. 打开
-              <a
-                href="https://vercel.com"
-                target="_blank"
-                className="text-yellow-600 transition hover:text-yellow-500"
-              >
-                Vercel.com
-              </a>
-              ，使用GitHub登录。
-            </li>
-            <li>
-              4. 选择 New Project → 找到 proxy-provider-converter → Import → 选择账号 → Deploy
-            </li>
-            <li>
-              5. 等待部署完成后，点 Visit 访问你的专属工具
-            </li>
+            <li>2. 按右上角 Fork，把專案複製到你的 GitHub。</li>
+            <li>3. Clone 專案並執行 pnpm install。</li>
+            <li>4. 執行 pnpm exec wrangler login 登入 Cloudflare。</li>
+            <li>5. 執行 pnpm run deploy，完成後開啟 Wrangler 回報的 workers.dev URL。</li>
           </ul>
         </div>
       </main>
@@ -184,5 +187,3 @@ ${hostname || "External Group"} = select, policy-path=${convertedUrl}
     </div>
   );
 }
-
-
