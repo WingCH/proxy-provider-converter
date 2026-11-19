@@ -9,6 +9,7 @@
 - 把完整 subscription 拆成可重用的 proxy node 清單。
 - 合併並統一管理來自不同 subscription 的節點。
 - 支援 Clash 與 Surge 之間的雙向轉換。
+- Clash → Surge 支援 JMS 使用的 VLESS TCP／REALITY／Vision 節點，保留 UUID、SNI、公鑰及 short ID。Surge 官方標示「VLESS iOS 6.0.0+ Mac 6.12.0+」，可沿用原有 External Group 訂閱網址。[Surge VLESS 手冊](https://manual.nssurge.com/policies/vless.html)
 - 讓節點來源與規則／策略設定分離。
 
 ## 使用方式

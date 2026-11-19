@@ -1,4 +1,5 @@
 import YAML from "yaml";
+import { z } from "zod";
 
 export type SubscriptionTarget = "clash" | "surge";
 
@@ -83,7 +84,30 @@ type TrojanExtras = {
   network?: "tcp"; // 限制为 tcp（排除 grpc 等）
 };
 
+// Clash 的 TCP / REALITY / Vision 節點，可直接輸出為 Surge 6 原生策略。
+const surgeField = z.string().min(1).regex(/^[^,"\r\n]+$/);
+const clashVlessReality = z.strictObject({
+  type: z.literal("vless"),
+  name: surgeField.regex(/^[^=]+$/),
+  server: surgeField,
+  port: z.number().int().min(1).max(65535),
+  uuid: surgeField,
+  network: z.literal("tcp").optional(),
+  tls: z.literal(true),
+  flow: z.literal("xtls-rprx-vision"),
+  encryption: z.enum(["", "none"]).optional(),
+  servername: surgeField,
+  "client-fingerprint": z.literal("chrome").optional(),
+  "reality-opts": z.strictObject({
+    "public-key": surgeField,
+    "short-id": z.string().regex(/^(?:[0-9a-fA-F]{2}){0,8}$/).optional(),
+  }),
+  alpn: z.array(surgeField).optional(),
+  udp: z.boolean().optional(),
+});
+
 type Proxy =
+  | z.infer<typeof clashVlessReality>
   | (ProxyCommon & { type: "ss" } & ShadowsocksExtras)
   | (ProxyCommon & { type: "vmess" } & VmessExtras)
   | (ProxyCommon & { type: "trojan" } & TrojanExtras);
@@ -534,8 +558,8 @@ function clashProxyToIntermediate(proxy: any): Proxy | undefined {
   if (!proxy || !proxy.type || !proxy.name || !proxy.server || !proxy.port) {
     return undefined;
   }
-  if (!["ss", "vmess", "trojan"].includes(proxy.type)) {
-    return undefined;
+  if (proxy.type === "vless") {
+    return clashVlessReality.safeParse(proxy).data;
   }
 
   if (proxy.type === "ss") {
@@ -609,6 +633,18 @@ function clashProxyToIntermediate(proxy: any): Proxy | undefined {
 // 中间格式 -> Surge 的单行节点定义
 function intermediateToSurgeLine(obj: Proxy): string | undefined {
   const common = `${obj.name} = ${obj.type}, ${obj.server}, ${obj.port}`;
+
+  if (obj.type === "vless") {
+    const reality = obj["reality-opts"];
+    const fields = [
+      common, `username=${obj.uuid}`, `flow=${obj.flow}`, `sni=${obj.servername}`,
+      `reality-public-key=${reality["public-key"]}`,
+    ];
+    if (reality["short-id"]) fields.push(`reality-short-id=${reality["short-id"]}`);
+    if (obj.alpn?.length) fields.push(`alpn="${obj.alpn.join(",")}"`);
+    if (obj.udp !== undefined) fields.push(`udp-relay=${obj.udp}`);
+    return fields.join(", ");
+  }
 
   if (obj.type === "ss") {
     let result = `${common}, encrypt-method=${obj.cipher}, password=${obj.password}`;

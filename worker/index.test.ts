@@ -111,6 +111,40 @@ describe("Worker routing", () => {
 });
 
 describe("Subscription conversion", () => {
+  it("preserves all six JMS policies and REALITY credentials in Surge output", async () => {
+    const key = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA";
+    const nodes = [2, 3, 4, 5, 801].map((id, index) => ({
+      name: `JMS ${id}`,
+      type: "vless",
+      server: `s${id}.example.com`,
+      port: 443,
+      uuid: `00000000-0000-4000-8000-${String(id).padStart(12, "0")}`,
+      network: "tcp",
+      tls: true,
+      flow: "xtls-rprx-vision",
+      encryption: "",
+      servername: `tls${id}.example.com`,
+      "client-fingerprint": "chrome",
+      "reality-opts": { "public-key": key, "short-id": String(id).padStart(16, "0") },
+      ...(index === 0 && { udp: false, alpn: ["h2", "http/1.1"] }),
+    }));
+    const source = YAML.stringify({ proxies: [...YAML.parse(CLASH_CONFIG).proxies, ...nodes] });
+    const response = await handleRequest(
+      createApiRequest("https://subscriptions.example/jms", "surge", "GET"),
+      createAssetsFetcher(""), createTextFetcher(source), TEST_POLICY
+    );
+    expect(response.status).toBe(200);
+    expect((await response.text()).split("\n")).toEqual([
+      "Test SS = ss, proxy.example.com, 443, encrypt-method=aes-128-gcm, password=test-password",
+      ...nodes.map((node, index) => [
+        `${node.name} = vless`, node.server, "443", `username=${node.uuid}`,
+        "flow=xtls-rprx-vision", `sni=${node.servername}`,
+        `reality-public-key=${key}`, `reality-short-id=${node["reality-opts"]["short-id"]}`,
+        ...(index === 0 ? ['alpn="h2,http/1.1"', "udp-relay=false"] : []),
+      ].join(", ")),
+    ]);
+  });
+
   it.each([
     {
       source: CLASH_CONFIG,
